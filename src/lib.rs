@@ -1,17 +1,6 @@
 use std::{collections::BTreeMap, fmt::Display};
 
-/// Possible errors encountered in the becoded input.
-#[derive(Debug, thiserror::Error)]
-pub enum BenCodeError {
-    #[error("invalid string: {0}")]
-    InvalidString(String),
-    #[error("invalid integer: {0}")]
-    InvalidInt(String),
-    #[error("invalid list: {0}")]
-    InvalidList(String),
-    #[error("invalid dictionary: {0}")]
-    InvalidDict(String),
-}
+use num_bigint::BigInt;
 
 /// Bencoded types.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -23,7 +12,7 @@ pub enum BenCode {
     ///  example i3e corresponds to 3 and i-3e corresponds to -3. Integers have no size limitation.
     ///  i-0e is invalid. All encodings with a leading zero, such as i03e, are invalid, other than
     ///  i0e, which of course corresponds to 0.
-    Int(isize),
+    Int(BigInt),
     /// Lists are encoded as an 'l' followed by their elements (also bencoded) followed by an 'e'.
     /// For example l4:spam4:eggse corresponds to ['spam', 'eggs'].
     List(Vec<BenCode>),
@@ -62,6 +51,195 @@ impl Display for BenCode {
     }
 }
 
+/// Possible errors encountered in the becoded input.
+#[derive(Debug, thiserror::Error)]
+pub enum BenCodeError {
+    #[error("invalid string")]
+    InvalidString,
+    #[error("invalid integer")]
+    InvalidInt,
+    #[error("invalid list")]
+    InvalidList,
+    #[error("invalid dictionary")]
+    InvalidDict,
+    #[error("unexpected byte: {0}")]
+    UnexpectedByte(u8),
+    #[error("input ended unexpectedly")]
+    UnexpectedEof,
+}
+
+#[derive(Debug)]
+pub struct BencodeParser<'input> {
+    /// Bencoded input.
+    input: &'input [u8],
+    /// The next byte index to consume.
+    idx: usize,
+}
+
+impl<'input> BencodeParser<'input> {
+    pub fn new(input: &'input [u8]) -> Self {
+        Self { input, idx: 0 }
+    }
+
+    pub fn next_byte(&mut self) -> Option<u8> {
+        let byte = self.input.get(self.idx).copied();
+        if byte.is_some() {
+            self.idx += 1
+        }
+        byte
+    }
+
+    pub fn peek(&self) -> Option<u8> {
+        self.input.get(self.idx).copied()
+    }
+
+    pub fn parse(&mut self) -> Result<BenCode, BenCodeError> {
+        match self.peek() {
+            Some(b'i') => self.parse_int(),
+            Some(b'l') => self.parse_list(),
+            Some(b'd') => self.parse_dict(),
+            Some(b) if b.is_ascii_digit() => self.parse_str(),
+            Some(b) => Err(BenCodeError::UnexpectedByte(b)),
+            None => Err(BenCodeError::UnexpectedEof),
+        }
+    }
+
+    fn parse_str(&mut self) -> Result<BenCode, BenCodeError> {
+        let len_start = self.idx;
+        while let Some(b) = self.peek() {
+            if b == b':' {
+                break;
+            }
+            if !b.is_ascii_digit() {
+                return Err(BenCodeError::InvalidString);
+            }
+            self.idx += 1
+        }
+
+        if self.peek() != Some(b':') {
+            return Err(BenCodeError::InvalidString);
+        }
+
+        let len: usize = std::str::from_utf8(&self.input[len_start..self.idx])
+            .map_err(|_| BenCodeError::InvalidString)?
+            .parse()
+            .map_err(|_| BenCodeError::InvalidString)?;
+
+        self.next_byte(); // consume semicolon
+
+        let str_start = self.idx;
+
+        if self.idx + len > self.input.len() {
+            return Err(BenCodeError::UnexpectedEof);
+        }
+
+        self.idx += len;
+        Ok(BenCode::String(self.input[str_start..self.idx].to_vec()))
+    }
+
+    fn parse_int(&mut self) -> Result<BenCode, BenCodeError> {
+        match self.next_byte() {
+            Some(b'i') => {}
+            _ => return Err(BenCodeError::InvalidInt),
+        }
+
+        let start = self.idx;
+
+        while let Some(b) = self.peek() {
+            if b == b'e' {
+                break;
+            }
+            self.idx += 1;
+        }
+
+        if self.peek() != Some(b'e') {
+            return Err(BenCodeError::InvalidInt);
+        }
+
+        let digits = &self.input[start..self.idx];
+
+        self.next_byte(); // consume 'e'
+
+        if digits.is_empty() || digits == b"-0" {
+            return Err(BenCodeError::InvalidInt);
+        }
+
+        if digits.len() > 1 {
+            if digits[0] == b'0' {
+                return Err(BenCodeError::InvalidInt);
+            }
+
+            if digits[0] == b'-' && digits.get(1) == Some(&b'0') {
+                return Err(BenCodeError::InvalidInt);
+            }
+        }
+
+        let n: BigInt = std::str::from_utf8(digits)
+            .map_err(|_| BenCodeError::InvalidInt)?
+            .parse()
+            .map_err(|_| BenCodeError::InvalidInt)?;
+
+        Ok(BenCode::Int(n))
+    }
+
+    fn parse_list(&mut self) -> Result<BenCode, BenCodeError> {
+        match self.next_byte() {
+            Some(b'l') => {}
+            _ => return Err(BenCodeError::InvalidInt),
+        }
+
+        let mut items = Vec::new();
+
+        while let Some(b) = self.peek() {
+            if b == b'e' {
+                break;
+            }
+            items.push(self.parse()?);
+        }
+
+        if self.peek() != Some(b'e') {
+            return Err(BenCodeError::InvalidList);
+        }
+
+        self.next_byte(); // consume 'e'
+
+        Ok(BenCode::List(items))
+    }
+
+    fn parse_dict(&mut self) -> Result<BenCode, BenCodeError> {
+        match self.next_byte() {
+            Some(b'd') => {}
+            _ => return Err(BenCodeError::InvalidDict),
+        }
+
+        let mut bt = BTreeMap::new();
+
+        while let Some(b) = self.peek() {
+            if b == b'e' {
+                break;
+            }
+
+            let key = match self.parse()? {
+                BenCode::String(s) => s,
+                _ => return Err(BenCodeError::InvalidDict),
+            };
+
+            let value = self.parse()?;
+            if bt.insert(key, value).is_some() {
+                return Err(BenCodeError::InvalidDict);
+            }
+        }
+
+        if self.peek() != Some(b'e') {
+            return Err(BenCodeError::InvalidDict);
+        }
+
+        self.next_byte(); // consume 'e'
+
+        Ok(BenCode::Dict(bt))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,7 +252,7 @@ mod tests {
 
     #[test]
     fn simple_int_bencode_display() {
-        let bencode = BenCode::Int(3);
+        let bencode = BenCode::Int(3.into());
         assert_eq!(format!("{bencode}").as_str(), "i3e");
     }
 
@@ -108,5 +286,41 @@ mod tests {
         );
         let bencode = BenCode::Dict(bt);
         assert_eq!(format!("{bencode}").as_str(), "d4:spaml1:a1:bee");
+    }
+
+    #[test]
+    fn parse_valid_simple_dict() {
+        let input = b"d4:spaml1:a1:bee";
+        let mut bt = BTreeMap::new();
+        bt.insert(
+            b"spam".to_vec(),
+            BenCode::List(vec![
+                BenCode::String("a".into()),
+                BenCode::String("b".into()),
+            ]),
+        );
+        let expected = BenCode::Dict(bt);
+        let parsed = BencodeParser::new(input).parse().expect("valid bencode");
+        assert_eq!(expected, parsed)
+    }
+
+    #[test]
+    fn parse_bencode_str() {
+        let input = b"4:spam";
+        let parsed = BencodeParser::new(input).parse().expect("valid bencode");
+        assert_eq!(parsed, BenCode::String(b"spam".to_vec()))
+    }
+
+    #[test]
+    fn invalid_bencode_int() {
+        let input = b"i-0e";
+        assert!(BencodeParser::new(input).parse().is_err());
+    }
+
+    #[test]
+    fn parse_valid_bencode_int() {
+        let input = b"i-3e";
+        let parsed = BencodeParser::new(input).parse().expect("valid bencode");
+        assert_eq!(parsed, BenCode::Int((-3).into()))
     }
 }
