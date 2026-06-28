@@ -1,0 +1,4 @@
+# `rtor`
+
+* Implementation of [The BitTorrent Protocol Specification
+  v2](https://www.bittorrent.org/beps/bep_0052.html)
