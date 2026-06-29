@@ -1,3 +1,4 @@
+//! Bencode types and parsing.
 use std::{collections::BTreeMap, fmt::Display};
 
 use num_bigint::BigInt;
@@ -54,22 +55,37 @@ impl Display for BenCode {
 /// Possible errors encountered in the becoded input.
 #[derive(Debug, thiserror::Error)]
 pub enum BenCodeError {
+    /// Invalid bencode string.
     #[error("invalid string")]
     InvalidString,
+    /// Invalid bencode integer.
     #[error("invalid integer")]
     InvalidInt,
+    /// Invalid bencode list.
     #[error("invalid list")]
     InvalidList,
+    /// Invalid bencode dictionary.
     #[error("invalid dictionary")]
     InvalidDict,
+    /// Unexpected encountered byte.
     #[error("unexpected byte: {0}")]
     UnexpectedByte(u8),
+    /// Unexpected end of input.
     #[error("input ended unexpectedly")]
     UnexpectedEof,
 }
 
+/// Attempt to parse the input bytes as `BenCode`.
+///
+/// # Errors
+///
+/// Returns a [`BenCodeError`] in the case of invalid bencoding.
+pub fn parse(input: &[u8]) -> Result<BenCode, BenCodeError> {
+    BencodeParser::new(input).parse()
+}
+
 #[derive(Debug)]
-pub struct BencodeParser<'input> {
+struct BencodeParser<'input> {
     /// Bencoded input.
     input: &'input [u8],
     /// The next byte index to consume.
@@ -77,11 +93,11 @@ pub struct BencodeParser<'input> {
 }
 
 impl<'input> BencodeParser<'input> {
-    pub fn new(input: &'input [u8]) -> Self {
+    fn new(input: &'input [u8]) -> Self {
         Self { input, idx: 0 }
     }
 
-    pub fn next_byte(&mut self) -> Option<u8> {
+    fn next_byte(&mut self) -> Option<u8> {
         let byte = self.input.get(self.idx).copied();
         if byte.is_some() {
             self.idx += 1
@@ -89,11 +105,11 @@ impl<'input> BencodeParser<'input> {
         byte
     }
 
-    pub fn peek(&self) -> Option<u8> {
+    fn peek(&self) -> Option<u8> {
         self.input.get(self.idx).copied()
     }
 
-    pub fn parse(&mut self) -> Result<BenCode, BenCodeError> {
+    fn parse(&mut self) -> Result<BenCode, BenCodeError> {
         match self.peek() {
             Some(b'i') => self.parse_int(),
             Some(b'l') => self.parse_list(),
